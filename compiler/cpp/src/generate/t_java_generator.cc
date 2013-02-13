@@ -72,6 +72,9 @@ public:
     iter = parsed_options.find("sorted_containers");
     sorted_containers_ = (iter != parsed_options.end());
 
+    iter = parsed_options.find("trove_lists");
+    trove_lists_ = (iter != parsed_options.end());
+
     iter = parsed_options.find("java5");
     java5_ = (iter != parsed_options.end());
     if (java5_) {
@@ -231,6 +234,7 @@ public:
                                           bool has_metadata = true);
 
   void generate_serialize_list_element   (std::ofstream& out,
+                                          std::string prefix,
                                           t_list*     tlist,
                                           std::string iter,
                                           bool has_metadata = true);
@@ -261,6 +265,7 @@ public:
   std::string java_type_imports();
   std::string type_name(t_type* ttype, bool in_container=false, bool in_init=false, bool skip_generic=false);
   std::string base_type_name(t_base_type* tbase, bool in_container=false);
+  std::string list_type_name(t_list* ttype, bool in_init, bool skip_generic);
   std::string declare_field(t_field* tfield, bool init=false);
   std::string function_signature(t_function* tfunction, std::string prefix="");
   std::string function_signature_async(t_function* tfunction, bool use_base_method = false, std::string prefix="");
@@ -272,6 +277,48 @@ public:
   void generate_struct_desc(ofstream& out, t_struct* tstruct);
   void generate_field_descs(ofstream& out, t_struct* tstruct);
   void generate_field_name_constants(ofstream& out, t_struct* tstruct);
+
+  std::string trove_list_type(t_list* tlist) {
+    t_type *elem_type = tlist->get_elem_type();
+    std::string prefix = trove_type_prefix(elem_type);
+    if (prefix.empty()) {
+      return prefix;
+    }
+
+    // expose the underlying trove collection.  when using trove, the user
+    // is likely performance concious & thus may want to utilize the most efficient methods
+    // for the collection.
+    return "T" + prefix + "ArrayList";
+  }
+ 
+  std::string trove_type_prefix(t_type *container_type) {
+    if (!trove_lists_) {
+      return "";
+    }
+    
+    if (!container_type->is_base_type()) {
+      return "";
+    }
+
+    t_base_type::t_base tbase = ((t_base_type *)container_type)->get_base();
+    switch (tbase) {
+      case t_base_type::TYPE_BYTE:
+        return "Byte";
+      case t_base_type::TYPE_I16:
+        return "Short";
+      case t_base_type::TYPE_I32:
+        return "Int";
+      case t_base_type::TYPE_I64:
+        return "Long";
+      case t_base_type::TYPE_DOUBLE:
+        return "Double";
+      case t_base_type::TYPE_VOID:
+      case t_base_type::TYPE_STRING:
+      case t_base_type::TYPE_BOOL:
+      default:
+        return "";
+    }
+  }
 
   bool type_can_be_null(t_type* ttype) {
     ttype = get_true_type(ttype);
@@ -303,6 +350,7 @@ public:
   bool android_legacy_;
   bool java5_;
   bool sorted_containers_;
+  bool trove_lists_;
 };
 
 
@@ -353,6 +401,8 @@ string t_java_generator::java_package() {
 string t_java_generator::java_type_imports() {
   string hash_builder;
   string tree_set_and_map;
+  string trove_collections;
+
   if (gen_hash_code_) {
     hash_builder = "import org.apache.commons.lang.builder.HashCodeBuilder;\n";
   }
@@ -360,6 +410,20 @@ string t_java_generator::java_type_imports() {
     tree_set_and_map = string() + 
       "import java.util.TreeSet;\n" +
       "import java.util.TreeMap;\n";
+  }
+  if (trove_lists_) {
+    // TODO: add support for Trove maps/sets
+    trove_collections = string() +
+      "import gnu.trove.list.TByteList;\n" +   
+      "import gnu.trove.list.array.TByteArrayList;\n" +   
+      "import gnu.trove.list.TShortList;\n" +   
+      "import gnu.trove.list.array.TShortArrayList;\n" +   
+      "import gnu.trove.list.TIntList;\n" +   
+      "import gnu.trove.list.array.TIntArrayList;\n" +   
+      "import gnu.trove.list.TLongList;\n" +   
+      "import gnu.trove.list.array.TLongArrayList;\n" +   
+      "import gnu.trove.list.TDoubleList;\n" +   
+      "import gnu.trove.list.array.TDoubleArrayList;\n";
   }
 
   return
@@ -386,6 +450,7 @@ string t_java_generator::java_type_imports() {
     "import java.util.BitSet;\n" +
     "import java.nio.ByteBuffer;\n"
     "import java.util.Arrays;\n" +
+    trove_collections +
     "import org.slf4j.Logger;\n" +
     "import org.slf4j.LoggerFactory;\n\n";
 }
@@ -1866,9 +1931,23 @@ void t_java_generator::generate_java_bean_boilerplate(ofstream& out,
       }
 
       // Iterator getter for sets and lists
-      indent(out) << "public java.util.Iterator<" <<
-        type_name(element_type, true, false) <<  "> get" << cap_name;
-      out << get_cap_name("iterator() {") << endl;
+      string iterator;
+      if (type->is_list()) {
+        string trove_type = trove_type_prefix(((t_list *)type)->get_elem_type());
+        if (!trove_type.empty()) {
+          iterator = "gnu.trove.iterator.T" + trove_type + "Iterator";
+        }
+      }
+        
+      indent(out) << "public ";
+      if (iterator.empty()) {
+        out << "java.util.Iterator<" <<
+          type_name(element_type, true, false) <<  ">";
+      } else {
+        out << iterator;
+      }
+
+      out << " get" << cap_name << get_cap_name("iterator() {") << endl;
 
       indent_up();
       indent(out) << "return (this." << field_name << " == null) ? null : " <<
@@ -3129,11 +3208,20 @@ void t_java_generator::generate_serialize_container(ofstream& out,
       " : " <<
       prefix << ")";
   } else if (ttype->is_list()) {
-    indent(out) <<
-      "for (" <<
-      type_name(((t_list*)ttype)->get_elem_type()) << " " << iter <<
-      " : " <<
-      prefix << ")";
+    if (!trove_type_prefix(((t_list*)ttype)->get_elem_type()).empty()) {
+      string i = "i__" + iter; // the counter into the trove list
+      string ni = "ni__" + iter; // the size of the trove list
+      indent(out) << "for (" <<
+        "int " << i << " = 0, " << ni << " = " << prefix << ".size(); " <<
+        i << " < " << ni << "; " <<
+        i << "++)";
+    } else {
+      indent(out) <<
+        "for (" <<
+        type_name(((t_list*)ttype)->get_elem_type()) << " " << iter <<
+        " : " <<
+        prefix << ")";
+    }
   }
 
   out << endl;
@@ -3143,7 +3231,7 @@ void t_java_generator::generate_serialize_container(ofstream& out,
   } else if (ttype->is_set()) {
     generate_serialize_set_element(out, (t_set*)ttype, iter, has_metadata);
   } else if (ttype->is_list()) {
-    generate_serialize_list_element(out, (t_list*)ttype, iter, has_metadata);
+    generate_serialize_list_element(out, prefix, (t_list*)ttype, iter, has_metadata);
   }
   scope_down(out);
 
@@ -3189,9 +3277,15 @@ void t_java_generator::generate_serialize_set_element(ofstream& out,
  * Serializes the members of a list.
  */
 void t_java_generator::generate_serialize_list_element(ofstream& out,
+                                                       string prefix,
                                                        t_list* tlist,
                                                        string iter,
                                                        bool has_metadata) {
+  string trove_cast_type = trove_list_type(tlist);
+  if (!trove_cast_type.empty()) {
+    // trove lists can only be primitives. do the acutal fetch of the value (since not using enhanced for-loop)
+    indent(out) << type_name(tlist->get_elem_type()) << " " << iter << " = ((" << trove_cast_type << ") " << prefix << ").getQuick(i__" << iter << ");\n";
+  }
   t_field efield(tlist->get_elem_type(), iter);
   generate_serialize_field(out, &efield, "", has_metadata);
 }
@@ -3237,13 +3331,7 @@ string t_java_generator::type_name(t_type* ttype, bool in_container, bool in_ini
     }
     return prefix + (skip_generic ? "" : "<" + type_name(tset->get_elem_type(), true) + ">");
   } else if (ttype->is_list()) {
-    t_list* tlist = (t_list*) ttype;
-    if (in_init) {
-      prefix = "ArrayList";
-    } else {
-      prefix = "List";
-    }
-    return prefix + (skip_generic ? "" : "<" + type_name(tlist->get_elem_type(), true) + ">");
+    return list_type_name((t_list *) ttype, in_init, skip_generic);
   }
 
   // Check for namespacing
@@ -3292,6 +3380,30 @@ string t_java_generator::base_type_name(t_base_type* type,
     default:
       throw "compiler error: no Java name for base type " + t_base_type::t_base_name(tbase);
   }
+}
+
+/**
+ * Returns the Java type that corresponds to the thrift list type.
+ * This has additional logic for handling trove types
+ * 
+ * @param ttype The collection type
+ * @param in_init Whether the type is being initialized or not
+ * @param skip_generic Whether or not generics should be skipped
+ */
+string t_java_generator::list_type_name(t_list* tlist, bool in_init, bool skip_generic) {
+  t_type *elem_type = tlist->get_elem_type();
+  string trove_container = trove_list_type(tlist);
+  if (!trove_container.empty()) {
+    return trove_container;
+  }
+
+  string prefix;
+  if (in_init) {
+    prefix = "ArrayList";
+  } else {
+    prefix = "List";
+  }
+  return prefix + (skip_generic ? "" : "<" + type_name(elem_type, true) + ">");
 }
 
 /**
@@ -4248,5 +4360,6 @@ THRIFT_REGISTER_GENERATOR(java, "Java",
 "    java5:           Generate Java 1.5 compliant code (includes android_legacy flag).\n"
 "    sorted_containers:\n"
 "                     Use TreeSet/TreeMap instead of HashSet/HashMap as a implementation of set/map.\n"
+"    trove_lists:     Use Trove array lists where possible instead of Java native collections.\n"
 )
 
